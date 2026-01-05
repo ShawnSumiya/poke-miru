@@ -15,6 +15,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "PokeMiru",
   description: "ポケモンカードを分析・評価するアプリ",
+  icons: {
+    icon: "/icon.png",
+  },
 };
 
 export default function RootLayout({
