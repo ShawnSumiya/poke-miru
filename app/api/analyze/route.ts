@@ -941,18 +941,100 @@ async function fetchYuyuteiPriceWithFallback(keywords: string[], targetName: str
 
 async function fetchYuyuteiPrice(keyword: string, targetName: string, targetRarity: string) {
   try {
-    const url = `https://yuyu-tei.jp/sell/poc/s/search?search_word=${encodeURIComponent(keyword)}`;
-    console.log(`🔍 遊々亭URL: ${url}`);
+    const targetUrl = `https://yuyu-tei.jp/sell/poc/s/search?search_word=${encodeURIComponent(keyword)}`;
+    console.log(`🔍 遊々亭URL: ${targetUrl}`);
+
+    // ZenRows 経由でのスクレイピング（本番環境で 403 回避用）
+    const zenRowsApiKey = process.env.ZENROWS_API_KEY;
+    let data: string | undefined;
+
+    if (zenRowsApiKey) {
+      // ZenRowsのパラメータを強化（403回避のため）
+      const zenRowsUrl = `https://api.zenrows.com/v1/?apikey=${zenRowsApiKey}&url=${encodeURIComponent(
+        targetUrl
+      )}&js_render=true&premium_proxy=true&proxy_country=jp&custom_headers=true&wait=2000`;
+
+      console.log("🌐 ZenRows 経由で遊々亭にアクセスします");
+
+      try {
+        const response = await axios.get(zenRowsUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+            "Referer": "https://yuyu-tei.jp/",
+          },
+          timeout: 20000,
+          maxRedirects: 5,
+        });
+
+        data = response.data as string;
+      } catch (zenRowsError: any) {
+        console.error(`❌ ZenRows エラー:`, zenRowsError.message);
+        if (zenRowsError.response) {
+          console.error(`   ステータス: ${zenRowsError.response.status}`);
+          console.error(`   URL: ${zenRowsError.config?.url}`);
+          console.error(`   レスポンス: ${JSON.stringify(zenRowsError.response.data).substring(0, 500)}`);
+        }
+        // ZenRowsで失敗した場合は直接アクセスを試す（フォールバック）
+        console.log("⚠️ ZenRowsで失敗したため、直接アクセスを試します...");
+        // dataを未定義にして、直接アクセスにフォールバック
+        data = undefined;
+      }
+    } else {
+      // ローカルや ZenRows 未設定環境では従来通り直接アクセス
+      console.log("⚠️ ZenRows APIキーが設定されていないため、直接アクセスを試します...");
+    }
+
+    // ZenRows未使用またはZenRowsで失敗した場合の直接アクセス
+    if (!zenRowsApiKey || data === undefined) {
+      try {
+        // より詳細なヘッダーを設定（403回避のため）
+        const response = await axios.get(targetUrl, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Referer": "https://yuyu-tei.jp/",
+            "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"macOS"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "Cache-Control": "max-age=0",
+          },
+          timeout: 10000,
+          maxRedirects: 5,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
+
+        data = response.data;
+      } catch (directError: any) {
+        // 直接アクセスでも403エラーが発生した場合
+        if (directError.response?.status === 403) {
+          console.error(`❌ 遊々亭 403エラー: アクセスが拒否されました`);
+          console.error(`   URL: ${targetUrl}`);
+          console.error(`   ステータス: ${directError.response.status}`);
+          console.error(`   レスポンスヘッダー: ${JSON.stringify(directError.response.headers).substring(0, 500)}`);
+          if (zenRowsApiKey) {
+            console.error(`   ⚠️ ZenRowsも失敗し、直接アクセスも403エラーです。ZenRowsの設定を確認してください。`);
+          } else {
+            console.error(`   ⚠️ 直接アクセスで403エラーです。ZenRows APIキーを設定することをお勧めします。`);
+          }
+        }
+        throw directError; // エラーを再スロー
+      }
+    }
     
-    const { data } = await axios.get(url, { 
-      headers: { 
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
-        "Referer": "https://yuyu-tei.jp/"
-      },
-      timeout: 7000
-    });
+    // dataが取得できていない場合はエラー
+    if (!data) {
+      throw new Error("遊々亭からデータを取得できませんでした");
+    }
     
     const $ = cheerio.load(data);
     let price = 0;
@@ -1184,7 +1266,26 @@ async function fetchYuyuteiPrice(keyword: string, targetName: string, targetRari
   } catch (e: any) {
     console.error(`❌ 遊々亭エラー (キーワード: "${keyword}"):`, e.message);
     if (e.response) {
-      console.error(`   ステータス: ${e.response.status}, URL: ${e.config?.url}`);
+      console.error(`   ステータス: ${e.response.status}, URL: ${e.config?.url || e.response.config?.url}`);
+      if (e.response.status === 403) {
+        console.error(`   ⚠️ 403 Forbidden: 遊々亭がアクセスを拒否しています`);
+        console.error(`   💡 解決策:`);
+        console.error(`      1. ZenRows APIキーを設定してください (環境変数: ZENROWS_API_KEY)`);
+        console.error(`      2. ZenRowsのプレミアムプロキシが有効になっているか確認してください`);
+        console.error(`      3. リクエスト頻度を下げてください`);
+      }
+      // レスポンスデータの一部を出力（デバッグ用）
+      if (e.response.data) {
+        const errorData = typeof e.response.data === 'string' 
+          ? e.response.data.substring(0, 500) 
+          : JSON.stringify(e.response.data).substring(0, 500);
+        console.error(`   レスポンスデータ: ${errorData}`);
+      }
+    } else if (e.request) {
+      console.error(`   リクエストは送信されましたが、レスポンスがありません`);
+      console.error(`   URL: ${e.config?.url}`);
+    } else {
+      console.error(`   エラー詳細:`, e);
     }
     return 0;
   }
