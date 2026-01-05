@@ -13,6 +13,10 @@ OPENAI_API_KEY=your_openai_api_key_here
 
 # eBay API
 EBAY_APP_ID=your_ebay_app_id_here
+
+# Stripe（Proプラン決済用）
+STRIPE_SECRET_KEY=sk_test_... # テスト環境のシークレットキー
+STRIPE_WEBHOOK_SECRET=whsec_... # Webhook署名検証用（本番環境で必要）
 ```
 
 ### AI APIの選択
@@ -28,6 +32,25 @@ EBAY_APP_ID=your_ebay_app_id_here
 4. 生成されたAPIキーを `.env.local` の `GEMINI_API_KEY` に設定
 
 **無料枠**: Gemini APIは月60リクエスト/分まで無料で使用できます（十分な量です！）
+
+### Stripe APIキーの取得方法
+
+1. [Stripe Dashboard](https://dashboard.stripe.com/) にアクセス
+2. テスト環境で「開発者」→「APIキー」からシークレットキーを取得
+3. `.env.local` の `STRIPE_SECRET_KEY` に設定
+4. Webhookを設定する場合（本番環境推奨）:
+   - 「開発者」→「Webhook」からエンドポイントを追加
+   - エンドポイントURL: `https://your-domain.com/api/subscription/webhook`
+   - イベント: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`
+   - 署名シークレットを `STRIPE_WEBHOOK_SECRET` に設定
+
+### レート制限とProプラン
+
+- **無料プラン**: 1日3回まで検索可能（IPアドレスベース）
+- **Proプラン（月額980円）**: 
+  - 無制限検索
+  - 検索履歴の自動保存
+  - 「利益が出るカードリスト」のCSV出力
 
 ## Getting Started
 

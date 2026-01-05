@@ -2,23 +2,73 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import axios from "axios";
 import * as cheerio from "cheerio";
+import { checkRateLimit, getClientIP } from "@/lib/rateLimit";
+import { checkSubscriptionStatus } from "@/lib/stripe";
 
 const IS_TEST_MODE = false;
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MAX_PRICE = 2000000;
 const USD_JPY_RATE = 150;
+const FREE_TIER_LIMIT = 3; // 無料プラン: 1日3回まで
+
+// OpenAIクライアントを取得する関数（遅延初期化）
+function getOpenAIClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY environment variable is not set");
+  }
+  return new OpenAI({ apiKey });
+}
 
 export async function POST(req: Request) {
   try {
-    const { image } = await req.json();
+    const { image, customerId } = await req.json();
     if (!image) return NextResponse.json({ error: "Image required" }, { status: 400 });
+
+    // Pro機能チェック
+    let isPro = false;
+    if (customerId && typeof customerId === "string") {
+      try {
+        isPro = await checkSubscriptionStatus(customerId);
+      } catch (error) {
+        console.error("Subscription check error:", error);
+        // エラーが発生しても続行（無料プランとして扱う）
+      }
+    }
+
+    // Proユーザーでない場合、レート制限をチェック
+    if (!isPro) {
+      const ipAddress = getClientIP(req);
+      const rateLimitResult = checkRateLimit(ipAddress, FREE_TIER_LIMIT);
+
+      if (!rateLimitResult.allowed) {
+        const resetDate = new Date(rateLimitResult.resetAt);
+        return NextResponse.json(
+          {
+            error: "Rate limit exceeded",
+            message: `1日の検索上限（${FREE_TIER_LIMIT}回）に達しました。Proプランにアップグレードすると無制限で検索できます。`,
+            resetAt: rateLimitResult.resetAt,
+            resetAtFormatted: resetDate.toISOString(),
+            upgradeRequired: true,
+          },
+          {
+            status: 429,
+            headers: {
+              "X-RateLimit-Limit": String(FREE_TIER_LIMIT),
+              "X-RateLimit-Remaining": String(rateLimitResult.remaining),
+              "X-RateLimit-Reset": String(rateLimitResult.resetAt),
+            },
+          }
+        );
+      }
+    }
 
     let aiData;
     if (IS_TEST_MODE) {
        aiData = { cardName: "Jolteon ex", cardNumber: "209/SAR", jpName: "サンダースex", yuyuteiKeyword: "サンダースex", isSlab: false, grade: null };
     } else {
       console.log("🚀 OpenAI問い合わせ中...");
+      const openai = getOpenAIClient();
       const aiResponse = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [

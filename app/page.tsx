@@ -1,7 +1,8 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
-import { Camera, X, ScanEye, TrendingUp, TrendingDown, ExternalLink, RefreshCw, Gem, Search, DollarSign, History, Trash2 } from "lucide-react";
+import { Camera, X, ScanEye, TrendingUp, TrendingDown, ExternalLink, RefreshCw, Gem, Search, DollarSign, History, Trash2, Crown, Download } from "lucide-react";
 import Image from "next/image";
+import { getStripeCustomerId, setStripeCustomerId, getProStatus, setProStatus, verifyProStatus } from "@/lib/subscription";
 
 interface CardData {
   cardName: string;
@@ -46,6 +47,10 @@ export default function Home() {
   const [result, setResult] = useState<CardData | null>(null);
   const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [isPro, setIsPro] = useState(false);
+  const [showProModal, setShowProModal] = useState(false);
+  const [isLoadingCheckout, setIsLoadingCheckout] = useState(false);
+  const [rateLimitError, setRateLimitError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 履歴をlocalStorageから読み込む
@@ -61,6 +66,21 @@ export default function Home() {
         console.error("履歴の読み込みに失敗しました:", error);
       }
     }
+  }, []);
+
+  // Pro状態を確認
+  useEffect(() => {
+    const checkProStatus = async () => {
+      const proStatus = getProStatus();
+      setIsPro(proStatus);
+      
+      // サーバーで再確認
+      if (proStatus) {
+        await verifyProStatus();
+        setIsPro(getProStatus());
+      }
+    };
+    checkProStatus();
   }, []);
 
   // 履歴をlocalStorageに保存する
@@ -181,19 +201,135 @@ export default function Home() {
     const file = fileInputRef.current?.files?.[0];
     if (!file) return;
     setIsAnalyzing(true);
+    setRateLimitError(null);
     try {
       const base64Image = await compressImage(file);
+      const customerId = getStripeCustomerId();
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: base64Image }),
+        body: JSON.stringify({ image: base64Image, customerId }),
       });
-      if (!response.ok) throw new Error("解析失敗");
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        if (response.status === 429) {
+          // レート制限エラー
+          setRateLimitError(errorData.message || "1日の検索上限に達しました。");
+          if (errorData.upgradeRequired) {
+            setShowProModal(true);
+          }
+          return;
+        }
+        throw new Error(errorData.error || "解析失敗");
+      }
+      
       const data = await response.json();
       setResult(data);
-      // 履歴に自動保存（画像も含む）
-      saveToHistory(data, base64Image);
-    } catch (error) { alert("解析に失敗しました。"); } finally { setIsAnalyzing(false); }
+      // 履歴に自動保存（画像も含む）- Proユーザーのみ
+      if (isPro) {
+        saveToHistory(data, base64Image);
+      }
+    } catch (error: any) {
+      alert(error.message || "解析に失敗しました。");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  // Stripe決済セッションを作成
+  const handleUpgradeToPro = async () => {
+    setIsLoadingCheckout(true);
+    try {
+      const customerId = getStripeCustomerId();
+      const response = await fetch("/api/subscription/create-checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId }),
+      });
+
+      if (!response.ok) {
+        throw new Error("決済セッションの作成に失敗しました");
+      }
+
+      const { url } = await response.json();
+      if (url) {
+        window.location.href = url;
+      }
+    } catch (error: any) {
+      alert(error.message || "決済の開始に失敗しました");
+    } finally {
+      setIsLoadingCheckout(false);
+    }
+  };
+
+  // CSV出力機能（利益が出るカードリスト）
+  const exportProfitableCardsCSV = () => {
+    if (!isPro) {
+      alert("Proプランでのみ利用可能な機能です。");
+      setShowProModal(true);
+      return;
+    }
+
+    // 利益が出るカード（未鑑定またはPSA10で利益が出る）をフィルタリング
+    const profitableCards = searchHistory.filter(
+      (item) => 
+        (item.profit !== undefined && item.profit > 0) ||
+        (item.psa10Profit !== undefined && item.psa10Profit > 0)
+    );
+
+    if (profitableCards.length === 0) {
+      alert("利益が出るカードが見つかりませんでした。");
+      return;
+    }
+
+    // CSV形式に変換
+    const headers = [
+      "カード名（日本語）",
+      "カード名（英語）",
+      "型番",
+      "日本価格（円）",
+      "eBay価格（USD）",
+      "eBay価格（円）",
+      "未鑑定利益（円）",
+      "PSA10価格（USD）",
+      "PSA10価格（円）",
+      "PSA10利益（円）",
+      "推奨",
+      "検索日時",
+    ];
+
+    const rows = profitableCards.map((item) => [
+      item.jpName,
+      item.cardName,
+      item.cardNumber,
+      item.jpPrice,
+      item.usPriceUsd,
+      item.usPrice,
+      item.profit || 0,
+      item.psa10PriceUsd || 0,
+      item.psa10Price || 0,
+      item.psa10Profit || 0,
+      item.recommendation,
+      new Date(item.timestamp).toLocaleString("ja-JP"),
+    ]);
+
+    const csvContent = [
+      headers.join(","),
+      ...rows.map((row) => row.map((cell) => `"${String(cell)}"`).join(",")),
+    ].join("\n");
+
+    // BOMを追加してExcelで正しく開けるようにする
+    const BOM = "\uFEFF";
+    const blob = new Blob([BOM + csvContent], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `利益が出るカードリスト_${new Date().toISOString().split("T")[0]}.csv`);
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const getBannerColor = (color: string) => {
@@ -231,19 +367,43 @@ export default function Home() {
         <div className="flex items-center gap-2">
           <ScanEye className="text-blue-600" /> 
           <h1 className="text-xl font-bold text-gray-800">PokeMiru</h1>
-        </div>
-        <button
-          onClick={() => setShowHistory(!showHistory)}
-          className="p-2 rounded-lg hover:bg-gray-100 transition relative"
-          title="検索履歴"
-        >
-          <History className="text-gray-600" size={20} />
-          {searchHistory.length > 0 && (
-            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-              {searchHistory.length}
+          {isPro && (
+            <span className="flex items-center gap-1 bg-gradient-to-r from-yellow-400 to-orange-500 text-white text-xs px-2 py-0.5 rounded-full font-bold">
+              <Crown size={12} /> Pro
             </span>
           )}
-        </button>
+        </div>
+        <div className="flex items-center gap-2">
+          {isPro && searchHistory.length > 0 && (
+            <button
+              onClick={exportProfitableCardsCSV}
+              className="p-2 rounded-lg hover:bg-gray-100 transition"
+              title="利益が出るカードリストをCSV出力"
+            >
+              <Download className="text-green-600" size={20} />
+            </button>
+          )}
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className="p-2 rounded-lg hover:bg-gray-100 transition relative"
+            title="検索履歴"
+          >
+            <History className="text-gray-600" size={20} />
+            {searchHistory.length > 0 && (
+              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                {searchHistory.length}
+              </span>
+            )}
+          </button>
+          {!isPro && (
+            <button
+              onClick={() => setShowProModal(true)}
+              className="px-3 py-1.5 bg-gradient-to-r from-yellow-400 to-orange-500 text-white text-xs font-bold rounded-lg hover:from-yellow-500 hover:to-orange-600 transition"
+            >
+              Pro
+            </button>
+          )}
+        </div>
       </header>
 
       <main className="w-full max-w-md p-4 space-y-4">
@@ -520,7 +680,91 @@ export default function Home() {
             </div>
           </div>
         )}
+
+        {/* レート制限エラー表示 */}
+        {rateLimitError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0">
+                <X className="text-red-600" size={20} />
+              </div>
+              <div className="flex-1">
+                <p className="text-sm font-bold text-red-800 mb-1">検索上限に達しました</p>
+                <p className="text-xs text-red-600 mb-3">{rateLimitError}</p>
+                <button
+                  onClick={() => setShowProModal(true)}
+                  className="w-full bg-gradient-to-r from-yellow-400 to-orange-500 text-white font-bold py-2 px-4 rounded-lg text-sm hover:from-yellow-500 hover:to-orange-600 transition"
+                >
+                  Proプランにアップグレード
+                </button>
+              </div>
+              <button
+                onClick={() => setRateLimitError(null)}
+                className="flex-shrink-0 text-red-400 hover:text-red-600"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+        )}
       </main>
+
+      {/* Proモーダル */}
+      {showProModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Crown className="text-yellow-500" size={24} />
+                <h2 className="text-xl font-bold text-gray-800">Proプラン</h2>
+              </div>
+              <button
+                onClick={() => setShowProModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="bg-gradient-to-r from-yellow-50 to-orange-50 p-4 rounded-lg border border-yellow-200">
+                <p className="text-2xl font-black text-gray-800 mb-1">月額980円</p>
+                <p className="text-xs text-gray-600">いつでもキャンセル可能</p>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="font-bold text-gray-800">Proプランの特典</h3>
+                <ul className="space-y-2 text-sm text-gray-700">
+                  <li className="flex items-start gap-2">
+                    <span className="text-green-500 mt-0.5">✓</span>
+                    <span>無制限検索（1日3回の制限なし）</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-green-500 mt-0.5">✓</span>
+                    <span>検索履歴の自動保存</span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-green-500 mt-0.5">✓</span>
+                    <span>「利益が出るカードリスト」のCSV出力</span>
+                  </li>
+                </ul>
+              </div>
+
+              <button
+                onClick={handleUpgradeToPro}
+                disabled={isLoadingCheckout}
+                className="w-full bg-gradient-to-r from-yellow-400 to-orange-500 text-white font-bold py-3 px-4 rounded-lg hover:from-yellow-500 hover:to-orange-600 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoadingCheckout ? "処理中..." : "Proプランにアップグレード"}
+              </button>
+
+              <p className="text-xs text-center text-gray-500">
+                決済はStripe経由で安全に処理されます
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
