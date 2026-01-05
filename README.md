@@ -1,5 +1,34 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## 環境変数の設定
+
+プロジェクトルートに `.env.local` ファイルを作成し、以下の環境変数を設定してください：
+
+```env
+# Google Gemini API（無料枠あり！優先使用・推奨）
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# OpenAI API（有料、フォールバック用）
+OPENAI_API_KEY=your_openai_api_key_here
+
+# eBay API
+EBAY_APP_ID=your_ebay_app_id_here
+```
+
+### AI APIの選択
+
+- **Google Gemini API**: **無料枠が大きく、優先使用！** 最初にGemini APIを使用します
+- **OpenAI API**: 有料ですが、高精度な解析が可能です。Gemini APIが失敗した場合に自動的にフォールバックします
+
+### Gemini APIキーの取得方法（無料）
+
+1. [Google AI Studio](https://makersuite.google.com/app/apikey) にアクセス
+2. Googleアカウントでログイン
+3. 「Create API Key」をクリック
+4. 生成されたAPIキーを `.env.local` の `GEMINI_API_KEY` に設定
+
+**無料枠**: Gemini APIは月60リクエスト/分まで無料で使用できます（十分な量です！）
+
 ## Getting Started
 
 First, run the development server:
