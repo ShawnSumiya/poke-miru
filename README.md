@@ -14,6 +14,9 @@ OPENAI_API_KEY=your_openai_api_key_here
 # eBay API
 EBAY_APP_ID=your_ebay_app_id_here
 
+# ZenRows API（遊々亭スクレイピング用、403エラー回避）
+ZENROWS_API_KEY=your_zenrows_api_key_here
+
 # Stripe（Proプラン決済用）
 STRIPE_SECRET_KEY=sk_test_... # テスト環境のシークレットキー
 STRIPE_WEBHOOK_SECRET=whsec_... # Webhook署名検証用（本番環境で必要）
@@ -43,6 +46,17 @@ STRIPE_WEBHOOK_SECRET=whsec_... # Webhook署名検証用（本番環境で必要
    - エンドポイントURL: `https://your-domain.com/api/subscription/webhook`
    - イベント: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`
    - 署名シークレットを `STRIPE_WEBHOOK_SECRET` に設定
+
+### ZenRows APIキーの取得方法（遊々亭スクレイピング用）
+
+遊々亭のスクレイピングで403エラーが発生する場合、ZenRows APIを使用することで回避できます。
+
+1. [ZenRows](https://www.zenrows.com/) にアクセス
+2. アカウントを作成（無料プランあり）
+3. ダッシュボードからAPIキーを取得
+4. `.env.local` の `ZENROWS_API_KEY` に設定
+
+**注意**: ZenRows APIキーが設定されていない場合、直接アクセスを試みますが、403エラーが発生する可能性があります。
 
 ### レート制限とProプラン
 

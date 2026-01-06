@@ -11,7 +11,7 @@ export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 });
 
 // Proプランの価格ID
-export const PRO_PRICE_ID = "price_1Sm9AvAxstjNYgiI1VZsnG5W";
+export const PRO_PRICE_ID = "price_1Sm93GAxstjNYgiIKhd3qp9g";
 
 /**
  * Stripe Customer IDからサブスクリプション状態を取得

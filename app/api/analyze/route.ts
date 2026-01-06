@@ -11,6 +11,139 @@ const MAX_PRICE = 2000000;
 const USD_JPY_RATE = 150;
 const FREE_TIER_LIMIT = 3; // 無料プラン: 1日3回まで
 
+// eBayアクセス制限（全ユーザー共通）
+interface EbayRateLimit {
+  lastAccessTime: number;
+  accessCount: number; // 直近1分間のアクセス数
+  blockedUntil: number; // ボット検出時のブロック解除時刻
+}
+
+interface EbayCacheEntry {
+  price: number;
+  timestamp: number;
+}
+
+// グローバルなeBayレート制限管理（インメモリ）
+const ebayRateLimit: EbayRateLimit = {
+  lastAccessTime: 0,
+  accessCount: 0,
+  blockedUntil: 0,
+};
+
+// eBay検索結果のキャッシュ（クエリ → 価格）
+const ebayCache = new Map<string, EbayCacheEntry>();
+
+// キャッシュの有効期限（30分）
+const CACHE_TTL = 30 * 60 * 1000;
+
+// eBayアクセス間隔の設定
+const EBAY_MIN_INTERVAL = 5000; // 最小5秒
+const EBAY_MAX_INTERVAL = 15000; // 最大15秒
+const EBAY_MAX_REQUESTS_PER_MINUTE = 3; // 1分間に最大3リクエスト
+
+/**
+ * eBayへのアクセスが許可されているかチェック
+ * @returns { allowed: boolean, waitTime: number } 許可されているか、待機時間（ミリ秒）
+ */
+function checkEbayRateLimit(): { allowed: boolean; waitTime: number } {
+  const now = Date.now();
+  
+  // ボット検出によるブロック中かチェック
+  if (now < ebayRateLimit.blockedUntil) {
+    const waitTime = ebayRateLimit.blockedUntil - now;
+    console.log(`⚠️ eBayアクセスがブロックされています。解除まで ${Math.ceil(waitTime / 1000)}秒待機が必要です。`);
+    return { allowed: false, waitTime };
+  }
+  
+  // ブロックが解除されたら、カウントをリセット
+  if (ebayRateLimit.blockedUntil > 0 && now >= ebayRateLimit.blockedUntil) {
+    ebayRateLimit.accessCount = 0;
+    ebayRateLimit.blockedUntil = 0;
+  }
+  
+  // 1分間のアクセス数をチェック
+  const oneMinuteAgo = now - 60 * 1000;
+  if (ebayRateLimit.lastAccessTime < oneMinuteAgo) {
+    // 1分以上経過している場合はカウントをリセット
+    ebayRateLimit.accessCount = 0;
+  }
+  
+  // レート制限を超えている場合
+  if (ebayRateLimit.accessCount >= EBAY_MAX_REQUESTS_PER_MINUTE) {
+    const waitTime = 60 * 1000 - (now - ebayRateLimit.lastAccessTime);
+    if (waitTime > 0) {
+      console.log(`⚠️ eBayレート制限: 1分間に${EBAY_MAX_REQUESTS_PER_MINUTE}回の制限に達しました。${Math.ceil(waitTime / 1000)}秒待機が必要です。`);
+      return { allowed: false, waitTime };
+    }
+  }
+  
+  // 最後のアクセスからの経過時間をチェック
+  const timeSinceLastAccess = now - ebayRateLimit.lastAccessTime;
+  const minInterval = EBAY_MIN_INTERVAL + Math.random() * (EBAY_MAX_INTERVAL - EBAY_MIN_INTERVAL);
+  
+  if (timeSinceLastAccess < minInterval) {
+    const waitTime = minInterval - timeSinceLastAccess;
+    return { allowed: false, waitTime };
+  }
+  
+  return { allowed: true, waitTime: 0 };
+}
+
+/**
+ * eBayアクセスを記録
+ */
+function recordEbayAccess() {
+  const now = Date.now();
+  ebayRateLimit.lastAccessTime = now;
+  ebayRateLimit.accessCount++;
+}
+
+/**
+ * eBayボット検出を記録（ブロック期間を設定）
+ */
+function recordEbayBotDetection() {
+  const now = Date.now();
+  // ボット検出時は30分間ブロック
+  ebayRateLimit.blockedUntil = now + 30 * 60 * 1000;
+  ebayRateLimit.accessCount = 0;
+  console.error(`🚫 eBayボット検出: 30分間のアクセスブロックを設定しました。`);
+}
+
+/**
+ * ランダムな待機時間を生成（人間らしい挙動のため）
+ */
+function getRandomDelay(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+/**
+ * eBay検索結果をキャッシュから取得
+ */
+function getEbayCache(query: string): number | null {
+  const entry = ebayCache.get(query);
+  if (!entry) return null;
+  
+  const now = Date.now();
+  if (now - entry.timestamp > CACHE_TTL) {
+    // キャッシュが期限切れ
+    ebayCache.delete(query);
+    return null;
+  }
+  
+  console.log(`💾 eBayキャッシュから取得: "${query}" = $${entry.price}`);
+  return entry.price;
+}
+
+/**
+ * eBay検索結果をキャッシュに保存
+ */
+function setEbayCache(query: string, price: number) {
+  ebayCache.set(query, {
+    price,
+    timestamp: Date.now(),
+  });
+}
+
 // OpenAIクライアントを取得する関数（遅延初期化）
 function getOpenAIClient() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -142,8 +275,18 @@ export async function POST(req: Request) {
     console.log(`  rawPriceUsd: $${priceChartingRawPrice} (取得元: ${usData.url || '不明'})`);
     console.log(`  psa10PriceUsd: $${priceChartingPsa10Price} (推定: ${isPsa10Estimated})`);
 
+    // eBayアクセスがブロックされているかチェック
+    const ebayBlocked = ebayRateLimit.blockedUntil > Date.now();
+    let ebayWarning = "";
+    
+    if (ebayBlocked) {
+      const blockRemaining = Math.ceil((ebayRateLimit.blockedUntil - Date.now()) / 60000); // 分単位
+      ebayWarning = `eBayへのアクセスが一時的に制限されています（残り約${blockRemaining}分）。PriceChartingの価格を使用します。`;
+      console.log(`⚠️ ${ebayWarning}`);
+    }
+    
     // ★ eBayから価格を取得（直近の売却価格を優先）
-    if (!isAlreadyPsa10) {
+    if (!isAlreadyPsa10 && !ebayBlocked) {
       // 未鑑定価格をeBayから取得
       console.log(`🔍 eBayから未鑑定価格を取得します...`);
       const ebayRawPrice = await fetchEbayDirect(aiData.cardName, aiData.cardNumber);
@@ -153,18 +296,37 @@ export async function POST(req: Request) {
       } else {
         console.log(`❌ eBayから未鑑定価格を取得できませんでした（PriceChartingの価格を使用）`);
       }
+    } else if (ebayBlocked) {
+      console.log(`⏭️ eBayがブロックされているため、未鑑定価格の取得をスキップします`);
     }
     
     // ★ PSA10価格は常にeBayから取得（画像がPSA10の場合でも表示するため）
-    console.log(`🔍 eBayからPSA10価格を取得します...`);
-    const ebayPsa10Price = await fetchEbayPsa10Price(aiData.cardName, aiData.cardNumber, isJapanese, aiData.jpName);
-    if (ebayPsa10Price > 0) {
-      console.log(`✅ eBayからPSA10価格を取得: $${ebayPsa10Price}`);
-      psa10PriceUsd = ebayPsa10Price;
-      isPsa10Estimated = false; // eBayから取得したので推定ではない
-    } else {
-      console.log(`❌ eBayからPSA10価格を取得できませんでした`);
-      // PSA10補完（eBayから取得できなかった場合、推定価格を計算）
+    if (!ebayBlocked) {
+      console.log(`🔍 eBayからPSA10価格を取得します...`);
+      const ebayPsa10Price = await fetchEbayPsa10Price(aiData.cardName, aiData.cardNumber, isJapanese, aiData.jpName);
+      if (ebayPsa10Price > 0) {
+        console.log(`✅ eBayからPSA10価格を取得: $${ebayPsa10Price}`);
+        psa10PriceUsd = ebayPsa10Price;
+        isPsa10Estimated = false; // eBayから取得したので推定ではない
+      } else {
+        console.log(`❌ eBayからPSA10価格を取得できませんでした`);
+        // PSA10補完（eBayから取得できなかった場合、推定価格を計算）
+        if (rawPriceUsd > 0 && psa10PriceUsd === 0) {
+          psa10PriceUsd = parseFloat((rawPriceUsd * 2.8).toFixed(2));
+          isPsa10Estimated = true;
+          console.log(`📊 PSA10推定価格を計算: $${rawPriceUsd} × 2.8 = $${psa10PriceUsd}`);
+        } else if (priceChartingPsa10Price > 0) {
+          // PriceChartingの価格を使用
+          psa10PriceUsd = priceChartingPsa10Price;
+          isPsa10Estimated = usData.isEstimated;
+          console.log(`📊 PriceChartingのPSA10価格を使用: $${psa10PriceUsd}`);
+        } else {
+          console.log(`⚠️ PSA10価格を取得できませんでした（未鑑定価格も取得できていないため推定不可）`);
+        }
+      }
+    } else if (ebayBlocked) {
+      console.log(`⏭️ eBayがブロックされているため、PSA10価格の取得をスキップします`);
+      // PSA10補完（eBayがブロックされている場合、推定価格を計算）
       if (rawPriceUsd > 0 && psa10PriceUsd === 0) {
         psa10PriceUsd = parseFloat((rawPriceUsd * 2.8).toFixed(2));
         isPsa10Estimated = true;
@@ -174,8 +336,6 @@ export async function POST(req: Request) {
         psa10PriceUsd = priceChartingPsa10Price;
         isPsa10Estimated = usData.isEstimated;
         console.log(`📊 PriceChartingのPSA10価格を使用: $${psa10PriceUsd}`);
-      } else {
-        console.log(`⚠️ PSA10価格を取得できませんでした（未鑑定価格も取得できていないため推定不可）`);
       }
     }
 
@@ -290,6 +450,7 @@ export async function POST(req: Request) {
       recColor: recColor,
       
       isValid: (rawPriceUsd > 0 || validJpPrice > 0),
+      ebayWarning: ebayWarning || undefined, // eBayブロック時の警告メッセージ
     });
 
   } catch (error: any) {
@@ -399,7 +560,7 @@ async function fetchPriceChartingSafe(cardName: string, cardNumber: string, isJa
 
 // eBay Finding API (Legacy)を使用してPSA10価格を取得する関数
 async function fetchEbayPsa10PriceViaAPI(cardName: string, cardNumber: string, isJapanese: boolean = false) {
-  const EBAY_APP_ID = "ShawnSum-PokeMiru-PRD-d46241164-bfb2dd8b";
+  const EBAY_APP_ID = process.env.EBAY_APP_ID || "ShawnSum-PokeMiru-PRD-d46241164-bfb2dd8b"; // フォールバック用
   const EBAY_FINDING_API = "https://svcs.ebay.com/services/search/FindingService/v1";
   
   try {
@@ -438,9 +599,18 @@ async function fetchEbayPsa10PriceViaAPI(cardName: string, cardNumber: string, i
     for (let i = 0; i < maxQueries; i++) {
       const query = queries[i];
       
-      // リクエスト間隔を空ける
+      // キャッシュをチェック
+      const cacheKey = `ebay_api_psa10:${query}`;
+      const cachedPrice = getEbayCache(cacheKey);
+      if (cachedPrice !== null) {
+        console.log(`💾 eBay APIキャッシュから取得: "${query}" = $${cachedPrice}`);
+        return cachedPrice;
+      }
+      
+      // レート制限をチェック（APIはスクレイピングより緩い制限）
       if (i > 0) {
-        await new Promise(resolve => setTimeout(resolve, 300));
+        const delay = getRandomDelay(1000, 3000); // APIは1-3秒の待機でOK
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
       
       try {
@@ -534,6 +704,10 @@ async function fetchEbayPsa10PriceViaAPI(cardName: string, cardNumber: string, i
           prices.sort((a, b) => a - b);
           const median = prices[Math.floor(prices.length / 2)];
           console.log(`✅ eBay Finding API PSA10中央値: $${median} (${prices.length}件の価格から) - クエリ: "${query}"`);
+          
+          // キャッシュに保存
+          setEbayCache(cacheKey, median);
+          
           return median;
         } else {
           console.log(`  ⚠️ クエリ "${query}" では価格が見つかりませんでした（検索結果は${items.length}件）`);
@@ -611,17 +785,48 @@ async function fetchEbayPsa10Price(cardName: string, cardNumber: string, isJapan
     for (let i = 0; i < maxQueries; i++) {
       const query = queries[i];
       
-      // リクエスト間隔を空ける（ボット検出を回避）
+      // キャッシュをチェック
+      const cacheKey = `ebay_psa10:${query}`;
+      const cachedPrice = getEbayCache(cacheKey);
+      if (cachedPrice !== null) {
+        console.log(`💾 eBay PSA10キャッシュから取得: "${query}" = $${cachedPrice}`);
+        return cachedPrice;
+      }
+      
+      // レート制限をチェック
+      const rateLimitCheck = checkEbayRateLimit();
+      if (!rateLimitCheck.allowed) {
+        console.log(`⏳ eBayレート制限: ${Math.ceil(rateLimitCheck.waitTime / 1000)}秒待機します...`);
+        await new Promise(resolve => setTimeout(resolve, rateLimitCheck.waitTime));
+      }
+      
+      // リクエスト間隔を空ける（ランダム化して人間らしく）
       if (i > 0) {
-        await new Promise(resolve => setTimeout(resolve, 800));
+        const delay = getRandomDelay(EBAY_MIN_INTERVAL, EBAY_MAX_INTERVAL);
+        console.log(`⏳ リクエスト間隔: ${Math.ceil(delay / 1000)}秒待機...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
       
       const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query.trim())}&LH_Sold=1&LH_Complete=1&_sop=12`;
       console.log(`🔍 eBay PSA10検索試行: "${query}"`);
       console.log(`🔍 eBay PSA10 URL: ${searchUrl}`);
       
-      try {
-        const { data } = await axios.get(searchUrl, { 
+      // アクセスを記録
+      recordEbayAccess();
+      
+      // リトライロジック（最大2回、指数バックオフ）
+      let querySuccess = false;
+      let queryPrice = 0;
+      
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+          const backoffDelay = Math.min(5000 * Math.pow(2, attempt - 1), 30000); // 最大30秒
+          console.log(`🔄 eBay PSA10リトライ ${attempt + 1}/2: ${Math.ceil(backoffDelay / 1000)}秒待機...`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+        }
+        
+        try {
+          const { data } = await axios.get(searchUrl, { 
           headers: { 
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -643,49 +848,49 @@ async function fetchEbayPsa10Price(cardName: string, cardNumber: string, isJapan
           validateStatus: (status) => status >= 200 && status < 400
         });
         
-        // ボット検出ページかどうかをチェック
-        if (data.includes("Pardon Our Interruption") || data.includes("security check") || data.includes("bot detection")) {
-          console.log(`  ⚠️ eBayのボット検出に引っかかりました（クエリ: "${query}"）`);
-          // 少し長めに待機してから次のクエリを試す
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          continue;
-        }
-        
-        const $ = cheerio.load(data);
-        const prices: number[] = [];
-        
-        // 複数のセレクターパターンを試す（eBayのHTML構造が変わった場合に対応）
-        const selectors = [
-          ".srp-results ul li.s-card",
-          ".srp-results .s-item",
-          ".srp-results li[data-view]",
-          ".srp-results .sresult",
-          "ul.srp-results li.s-item"
-        ];
-        
-        let allCards = $();
-        let usedSelector = "";
-        for (const selector of selectors) {
-          const found = $(selector);
-          if (found.length > 0) {
-            allCards = found;
-            usedSelector = selector;
-            console.log(`📊 eBay PSA10検索結果: ${allCards.length}件のカード要素を発見（セレクター: ${selector}）`);
-            break;
+          // ボット検出ページかどうかをチェック
+          if (data.includes("Pardon Our Interruption") || data.includes("security check") || data.includes("bot detection")) {
+            console.log(`  ⚠️ eBayのボット検出に引っかかりました（クエリ: "${query}"）`);
+            recordEbayBotDetection();
+            // このクエリはスキップして次のクエリを試す
+            break; // 内側のリトライループを抜ける
           }
-        }
         
-        // セレクターが見つからない場合、デバッグ情報を出力
-        if (allCards.length === 0) {
-          console.log(`⚠️ 検索結果のセレクターが見つかりません。HTML構造を確認します...`);
-          const pageText = $.text().substring(0, 500);
-          console.log(`   ページの先頭500文字: ${pageText}...`);
-          const hasResults = $.text().toLowerCase().includes("results") || $.text().toLowerCase().includes("listing");
-          console.log(`   検索結果ページらしい: ${hasResults}`);
-        }
-        
-        // PSA10の検索結果から価格を取得
-        allCards.each((_, el) => {
+          const $ = cheerio.load(data);
+          const prices: number[] = [];
+          
+          // 複数のセレクターパターンを試す（eBayのHTML構造が変わった場合に対応）
+          const selectors = [
+            ".srp-results ul li.s-card",
+            ".srp-results .s-item",
+            ".srp-results li[data-view]",
+            ".srp-results .sresult",
+            "ul.srp-results li.s-item"
+          ];
+          
+          let allCards = $();
+          let usedSelector = "";
+          for (const selector of selectors) {
+            const found = $(selector);
+            if (found.length > 0) {
+              allCards = found;
+              usedSelector = selector;
+              console.log(`📊 eBay PSA10検索結果: ${allCards.length}件のカード要素を発見（セレクター: ${selector}）`);
+              break;
+            }
+          }
+          
+          // セレクターが見つからない場合、デバッグ情報を出力
+          if (allCards.length === 0) {
+            console.log(`⚠️ 検索結果のセレクターが見つかりません。HTML構造を確認します...`);
+            const pageText = $.text().substring(0, 500);
+            console.log(`   ページの先頭500文字: ${pageText}...`);
+            const hasResults = $.text().toLowerCase().includes("results") || $.text().toLowerCase().includes("listing");
+            console.log(`   検索結果ページらしい: ${hasResults}`);
+          }
+          
+          // PSA10の検索結果から価格を取得
+          allCards.each((_, el) => {
           const $el = $(el);
           const fullText = $el.text().toUpperCase();
           
@@ -770,28 +975,55 @@ async function fetchEbayPsa10Price(cardName: string, cardNumber: string, isJapan
           }
         });
         
-        if (prices.length > 0) {
-          prices.sort((a, b) => a - b);
-          const median = prices[Math.floor(prices.length / 2)];
-          console.log(`✅ eBay PSA10中央値: $${median} (${prices.length}件の価格から) - クエリ: "${query}"`);
-          return median;
-        } else {
-          if (allCards.length > 0) {
-            console.log(`  ⚠️ クエリ "${query}" では価格が見つかりませんでした（検索結果は${allCards.length}件、セレクター: ${usedSelector || '不明'}）`);
-            // 最初の数件のタイトルを表示してデバッグ
-            allCards.slice(0, 3).each((i, el) => {
-              const $el = $(el);
-              const title = $el.find(".s-card__title, h3.s-card__title, .s-item__title").first().text().trim() || 
-                           $el.text().substring(0, 80);
-              console.log(`     検索結果${i + 1}: ${title}...`);
-            });
+          if (prices.length > 0) {
+            prices.sort((a, b) => a - b);
+            const median = prices[Math.floor(prices.length / 2)];
+            console.log(`✅ eBay PSA10中央値: $${median} (${prices.length}件の価格から) - クエリ: "${query}"`);
+            
+            // キャッシュに保存
+            setEbayCache(cacheKey, median);
+            
+            querySuccess = true;
+            queryPrice = median;
+            break; // リトライループを抜ける
           } else {
-            console.log(`  ⚠️ クエリ "${query}" では検索結果が見つかりませんでした（セレクターが見つからない可能性）`);
+            if (allCards.length > 0) {
+              console.log(`  ⚠️ クエリ "${query}" では価格が見つかりませんでした（検索結果は${allCards.length}件、セレクター: ${usedSelector || '不明'}）`);
+              // 最初の数件のタイトルを表示してデバッグ
+              allCards.slice(0, 3).each((i, el) => {
+                const $el = $(el);
+                const title = $el.find(".s-card__title, h3.s-card__title, .s-item__title").first().text().trim() || 
+                             $el.text().substring(0, 80);
+                console.log(`     検索結果${i + 1}: ${title}...`);
+              });
+            } else {
+              console.log(`  ⚠️ クエリ "${query}" では検索結果が見つかりませんでした（セレクターが見つからない可能性）`);
+            }
+            // 価格が見つからなくても、ボット検出でなければ成功とみなす（次のクエリを試す）
+            querySuccess = true;
+            break;
           }
+        } catch (requestError: any) {
+          if (requestError.response?.status === 403 || requestError.response?.status === 429) {
+            console.log(`  ⚠️ eBayアクセス拒否 (${requestError.response.status}): リトライします...`);
+            recordEbayBotDetection();
+            continue; // リトライ
+          }
+          // その他のエラーは次のクエリを試す
+          console.log(`  ⚠️ クエリ "${query}" でエラー: ${requestError.message}`);
+          break;
         }
-      } catch (queryError: any) {
-        console.log(`  ⚠️ クエリ "${query}" でエラー: ${queryError.message}`);
-        continue; // 次のクエリを試す
+      }
+      
+      // このクエリで価格が取得できた場合は返す
+      if (querySuccess && queryPrice > 0) {
+        return queryPrice;
+      }
+      
+      // ボット検出された場合は、残りのクエリをスキップ
+      if (ebayRateLimit.blockedUntil > Date.now()) {
+        console.log(`🚫 eBayボット検出により、残りのクエリをスキップします`);
+        break;
       }
     }
     
@@ -815,10 +1047,38 @@ async function fetchEbayDirect(cardName: string, cardNumber: string) {
     // 型番から#記号を除去
     const cleanCardNumber = cardNumber.replace(/^#+/, "");
     const query = `${cardName} ${cleanCardNumber} Pokemon`.trim();
+    
+    // キャッシュをチェック
+    const cacheKey = `ebay_direct:${query}`;
+    const cachedPrice = getEbayCache(cacheKey);
+    if (cachedPrice !== null) {
+      return cachedPrice;
+    }
+    
+    // レート制限をチェック
+    const rateLimitCheck = checkEbayRateLimit();
+    if (!rateLimitCheck.allowed) {
+      console.log(`⏳ eBayレート制限: ${Math.ceil(rateLimitCheck.waitTime / 1000)}秒待機します...`);
+      await new Promise(resolve => setTimeout(resolve, rateLimitCheck.waitTime));
+    }
+    
     const searchUrl = `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1&_sop=12`;
     console.log(`🔍 eBay URL: ${searchUrl}`);
     
-    const { data } = await axios.get(searchUrl, { 
+    // アクセスを記録
+    recordEbayAccess();
+    
+    // リトライロジック（最大3回、指数バックオフ）
+    let lastError: any = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        const backoffDelay = Math.min(1000 * Math.pow(2, attempt - 1), 30000); // 最大30秒
+        console.log(`🔄 eBayリトライ ${attempt + 1}/3: ${Math.ceil(backoffDelay / 1000)}秒待機...`);
+        await new Promise(resolve => setTimeout(resolve, backoffDelay));
+      }
+      
+      try {
+        const { data } = await axios.get(searchUrl, { 
       headers: { 
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -840,17 +1100,19 @@ async function fetchEbayDirect(cardName: string, cardNumber: string) {
       validateStatus: (status) => status >= 200 && status < 400
     });
     
-    // ボット検出ページかどうかをチェック
-    if (data.includes("Pardon Our Interruption") || data.includes("security check") || data.includes("bot detection")) {
-      console.log(`  ⚠️ eBayのボット検出に引っかかりました（未鑑定価格取得）`);
-      return 0;
-    }
+        // ボット検出ページかどうかをチェック
+        if (data.includes("Pardon Our Interruption") || data.includes("security check") || data.includes("bot detection")) {
+          console.log(`  ⚠️ eBayのボット検出に引っかかりました（未鑑定価格取得）`);
+          recordEbayBotDetection();
+          lastError = new Error("eBay bot detection");
+          continue; // リトライ
+        }
     
-    const $ = cheerio.load(data);
-    const prices: number[] = [];
-    
-    // ★ 新しい構造: .srp-results ul li.s-card を使用
-    $(".srp-results ul li.s-card").each((_, el) => {
+        const $ = cheerio.load(data);
+        const prices: number[] = [];
+        
+        // ★ 新しい構造: .srp-results ul li.s-card を使用
+        $(".srp-results ul li.s-card").each((_, el) => {
       const $el = $(el);
       
       // カード要素全体のテキストを取得（タイトル、サブタイトル、説明などすべて）
@@ -905,15 +1167,41 @@ async function fetchEbayDirect(cardName: string, cardNumber: string) {
       }
     });
     
-    if (prices.length === 0) {
-      console.log(`❌ eBay: 価格が見つかりませんでした（USDまたは円表示）`);
-      return 0;
+        if (prices.length === 0) {
+          console.log(`❌ eBay: 価格が見つかりませんでした（USDまたは円表示）`);
+          lastError = new Error("No prices found");
+          continue; // リトライ
+        }
+    
+        prices.sort((a, b) => a - b);
+        const median = prices[Math.floor(prices.length / 2)];
+        console.log(`✅ eBay中央値: $${median} (${prices.length}件の価格から)`);
+        
+        // キャッシュに保存
+        if (median > 0) {
+          setEbayCache(cacheKey, median);
+        }
+        
+        return median;
+      } catch (requestError: any) {
+        lastError = requestError;
+        if (requestError.response?.status === 403 || requestError.response?.status === 429) {
+          console.log(`  ⚠️ eBayアクセス拒否 (${requestError.response.status}): リトライします...`);
+          recordEbayBotDetection();
+          continue;
+        }
+        // その他のエラーは即座にスロー
+        throw requestError;
+      }
     }
     
-    prices.sort((a, b) => a - b);
-    const median = prices[Math.floor(prices.length / 2)];
-    console.log(`✅ eBay中央値: $${median} (${prices.length}件の価格から)`);
-    return median;
+    // すべてのリトライが失敗
+    if (lastError) {
+      console.error(`❌ eBay: すべてのリトライが失敗しました`);
+      throw lastError;
+    }
+    
+    return 0;
   } catch (e: any) {
     console.error(`❌ eBayエラー:`, e.message);
     if (e.response) {
