@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Camera, X, ScanEye, TrendingUp, TrendingDown, ExternalLink, RefreshCw, Gem, Search, DollarSign, History, Trash2, Crown, Download } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { getStripeCustomerId, setStripeCustomerId, getProStatus, setProStatus, verifyProStatus } from "@/lib/subscription";
 
 interface CardData {
@@ -708,6 +709,16 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {/* フッター */}
+      <footer className="w-full max-w-md px-4 py-6 text-center">
+        <Link
+          href="/specified-commercial-transactions"
+          className="text-xs text-gray-400 hover:text-gray-600 transition underline"
+        >
+          特定商取引法に基づく表記
+        </Link>
+      </footer>
 
       {/* Proモーダル */}
       {showProModal && (
