@@ -3,11 +3,8 @@ import { stripe, PRO_PRICE_ID } from "@/lib/stripe";
 
 export async function POST(req: Request) {
   try {
-    const { customerId } = await req.json();
-
     // Checkout Sessionを作成
     const session = await stripe.checkout.sessions.create({
-      customer: customerId || undefined,
       mode: "subscription",
       line_items: [
         {
